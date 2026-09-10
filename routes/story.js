@@ -66,7 +66,7 @@ router.post('/generate', async (req, res) => {
           prompt: imagePrompt,
           width: 768,
           height: 512,
-          num_outputs: 2
+          num_outputs: 2,
           guidance_scale: 7.5,
         }
       }
