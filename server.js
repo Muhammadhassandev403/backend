@@ -14,10 +14,14 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+// CORS - allow all origins
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'x-user-token']
+}));
 app.use(express.json());
 
-// Routes
 app.use('/api/story', storyRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/user', userRoutes);
