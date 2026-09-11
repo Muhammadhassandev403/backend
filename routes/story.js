@@ -1,26 +1,47 @@
 import express from 'express';
-import OpenAI from 'openai';
-import Replicate from 'replicate';
 import { createClient } from '@supabase/supabase-js';
 
 const router = express.Router();
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const replicate = new Replicate({ auth: process.env.REPLICATE_API_TOKEN });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+
+// Helper: Call Groq API
+async function generateWithGroq(prompt) {
+  const apiKey = process.env.GROQ_API_KEY;
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.85,
+      response_format: { type: 'json_object' }
+    })
+  });
+
+  const data = await response.json();
+
+  if (!data.choices || !data.choices[0]) {
+    throw new Error('Groq API error: ' + JSON.stringify(data));
+  }
+
+  return data.choices[0].message.content;
+}
 
 // Helper: Get or create user
 async function getOrCreateUser(token) {
   if (!token) return null;
-  
+
   const { data: user } = await supabase
     .from('users')
     .select('*')
     .eq('token', token)
     .single();
-  
+
   if (user) return user;
-  
-  // Create user if doesn't exist
+
   const { data: newUser } = await supabase
     .from('users')
     .insert({
@@ -31,7 +52,7 @@ async function getOrCreateUser(token) {
     })
     .select()
     .single();
-  
+
   return newUser;
 }
 
@@ -40,17 +61,10 @@ router.post('/generate', async (req, res) => {
   const { scenario, chapterNumber = 1, userToken } = req.body;
   const token = userToken || req.headers['x-user-token'];
 
-  console.log('Generate called. Token:', token, 'Scenario:', scenario);
-
-  if (!token) {
-    return res.status(401).json({ error: 'No token provided' });
-  }
+  if (!token) return res.status(401).json({ error: 'No token provided' });
 
   const user = await getOrCreateUser(token);
-
-  if (!user) {
-    return res.status(401).json({ error: 'User not found' });
-  }
+  if (!user) return res.status(401).json({ error: 'User not found' });
 
   if (user.chapters_used >= 3 && !user.has_paid) {
     return res.status(402).json({
@@ -64,7 +78,7 @@ router.post('/generate', async (req, res) => {
 
 Scenario: ${scenario}
 
-Output JSON format:
+Respond ONLY with valid JSON:
 {
   "title": "Chapter title",
   "narrative": "The story text (3-5 paragraphs)",
@@ -75,16 +89,9 @@ Output JSON format:
   ]
 }`;
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4-turbo",
-      messages: [{ role: "user", content: storyPrompt }],
-      temperature: 0.85,
-      response_format: { type: "json_object" }
-    });
+    const rawText = await generateWithGroq(storyPrompt);
+    const storyData = JSON.parse(rawText);
 
-    const storyData = JSON.parse(completion.choices[0].message.content);
-
-    // Save chapter
     const { data: saved } = await supabase
       .from('chapters')
       .insert({
@@ -99,7 +106,6 @@ Output JSON format:
       .select()
       .single();
 
-    // Increment chapters used
     if (chapterNumber <= 3) {
       await supabase
         .from('users')
@@ -126,10 +132,7 @@ router.post('/continue', async (req, res) => {
   const token = userToken || req.headers['x-user-token'];
 
   const user = await getOrCreateUser(token);
-
-  if (!user) {
-    return res.status(401).json({ error: 'User not found' });
-  }
+  if (!user) return res.status(401).json({ error: 'User not found' });
 
   if (user.chapters_used >= 3 && !user.has_paid) {
     return res.status(402).json({ error: 'PAYMENT_REQUIRED' });
@@ -149,10 +152,10 @@ router.post('/continue', async (req, res) => {
 Previous chapter: ${prev.narrative}
 Player chose: ${prev.choices[choiceIndex].label} - ${prev.choices[choiceIndex].description}
 
-Generate Chapter ${nextChapter} in JSON format:
+Respond ONLY with valid JSON:
 {
   "title": "Chapter title",
-  "narrative": "The story continues... (3-5 paragraphs)",
+  "narrative": "The story continues...",
   "choices": [
     { "label": "Choice A", "description": "..." },
     { "label": "Choice B", "description": "..." },
@@ -160,14 +163,8 @@ Generate Chapter ${nextChapter} in JSON format:
   ]
 }`;
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4-turbo",
-      messages: [{ role: "user", content: continuationPrompt }],
-      temperature: 0.85,
-      response_format: { type: "json_object" }
-    });
-
-    const storyData = JSON.parse(completion.choices[0].message.content);
+    const rawText = await generateWithGroq(continuationPrompt);
+    const storyData = JSON.parse(rawText);
 
     const { data: saved } = await supabase
       .from('chapters')
@@ -208,30 +205,24 @@ router.post('/roll', async (req, res) => {
   if (!chapter) return res.status(404).json({ error: 'Chapter not found' });
 
   const choice = chapter.choices[choiceIndex];
-  if (!choice) return res.status(400).json({ error: 'Invalid choice' });
 
-  const dicePrompt = `You are a fantasy game master. Player chose: "${choice.label}".
+  try {
+    const dicePrompt = `You are a fantasy game master. Player chose: "${choice.label}".
 They rolled ${diceType} and got: ${rollValue}.
-Generate a dramatic outcome.
+Respond ONLY with JSON: { "outcome": "The dramatic result..." }`;
 
-Respond in JSON:
-{ "outcome": "The dramatic result..." }`;
+    const rawText = await generateWithGroq(dicePrompt);
+    const result = JSON.parse(rawText);
 
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4-turbo",
-    messages: [{ role: "user", content: dicePrompt }],
-    temperature: 0.8,
-    response_format: { type: "json_object" }
-  });
-
-  const result = JSON.parse(completion.choices[0].message.content);
-
-  res.json({
-    roll_value: rollValue,
-    dice_type: diceType,
-    outcome: result.outcome,
-    choice_made: choice.label
-  });
+    res.json({
+      roll_value: rollValue,
+      dice_type: diceType,
+      outcome: result.outcome,
+      choice_made: choice.label
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 export default router;
