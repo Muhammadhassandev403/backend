@@ -1,10 +1,32 @@
 import express from 'express';
-import OpenAI from 'openai';
 import { createClient } from '@supabase/supabase-js';
 
 const router = express.Router();
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+
+// Helper: Call Groq API
+async function generateWithGroq(prompt) {
+  const apiKey = process.env.GROQ_API_KEY;
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + apiKey,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.85,
+      response_format: { type: 'json_object' }
+    })
+  });
+
+  const data = await response.json();
+  if (!data.choices || !data.choices[0]) {
+    throw new Error('Groq API error: ' + JSON.stringify(data));
+  }
+  return data.choices[0].message.content;
+}
 
 // Get full story history
 router.get('/history/:branchId?', async (req, res) => {
@@ -26,14 +48,14 @@ router.get('/history/:branchId?', async (req, res) => {
       .eq('user_token', token)
       .eq('is_active', true)
       .single();
-    
+
     if (activeBranch) {
       query = query.eq('branch_id', activeBranch.id);
     }
   }
 
   const { data: chapters } = await query;
-  
+
   const { data: branches } = await supabase
     .from('story_branches')
     .select('*')
@@ -67,7 +89,7 @@ router.post('/edit-chapter', async (req, res) => {
     .from('story_branches')
     .insert({
       user_token: token,
-      branch_name: `Edit at Chapter ${original.chapter_number} - ${new Date().toLocaleString()}`,
+      branch_name: 'Edit at Chapter ' + original.chapter_number + ' - ' + new Date().toLocaleString(),
       is_active: true
     })
     .select()
@@ -116,33 +138,11 @@ router.post('/edit-chapter', async (req, res) => {
 
     for (let i = 0; i < 5; i++) {
       const nextNum = currentChapterNumber + i + 1;
-      
-      const continuationPrompt = `
-        You are a fantasy adventure writer. Continue the story from this point.
-        
-        Previous chapter: ${currentNarrative}
-        Player chose: ${currentChoices?.[0]?.label || 'continue'} - ${currentChoices?.[0]?.description || 'the adventure continues'}
-        
-        Generate Chapter ${nextNum} in JSON format:
-        {
-          "title": "Chapter title",
-          "narrative": "The story continues... (3-5 paragraphs)",
-          "choices": [
-            { "label": "Choice A", "description": "..." },
-            { "label": "Choice B", "description": "..." },
-            { "label": "Choice C", "description": "..." }
-          ]
-        }
-      `;
 
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4-turbo",
-        messages: [{ role: "user", content: continuationPrompt }],
-        temperature: 0.85,
-        response_format: { type: "json_object" }
-      });
+      const continuationPrompt = 'You are a fantasy adventure writer. Continue the story.\n\nPrevious chapter: ' + currentNarrative + '\nPlayer chose: ' + (currentChoices?.[0]?.label || 'continue') + ' - ' + (currentChoices?.[0]?.description || 'continue') + '\n\nRespond ONLY with valid JSON:\n{\n  "title": "Chapter title",\n  "narrative": "The story continues...",\n  "choices": [\n    { "label": "Choice A", "description": "..." },\n    { "label": "Choice B", "description": "..." },\n    { "label": "Choice C", "description": "..." }\n  ]\n}';
 
-      const storyData = JSON.parse(completion.choices[0].message.content);
+      const rawText = await generateWithGroq(continuationPrompt);
+      const storyData = JSON.parse(rawText);
 
       const { data: newChapter } = await supabase
         .from('chapters')
@@ -178,14 +178,9 @@ router.post('/edit-chapter', async (req, res) => {
 
   res.json({
     branch_id: branch.id,
-    edited_chapter: {
-      ...original,
-      title: newTitle,
-      narrative: newNarrative,
-      choices: newChoices
-    },
+    edited_chapter: { ...original, title: newTitle, narrative: newNarrative, choices: newChoices },
     regenerated_chapters: regeneratedChapters,
-    message: `✅ Chapter ${original.chapter_number} edited! ${regeneratedChapters.length} future chapters regenerated.`
+    message: 'Chapter edited! ' + regeneratedChapters.length + ' future chapters regenerated.'
   });
 });
 
@@ -220,11 +215,7 @@ router.post('/switch-branch', async (req, res) => {
       .eq('token', token);
   }
 
-  res.json({ 
-    success: true, 
-    branch_id: branchId,
-    last_chapter_id: lastChapter?.id || null
-  });
+  res.json({ success: true, branch_id: branchId, last_chapter_id: lastChapter?.id || null });
 });
 
 export default router;
